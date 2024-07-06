@@ -1,0 +1,87 @@
+version: 3
+silent: true
+
+vars:
+  DOCKER_TAG: resty-snowflake-demo
+  PRIVATE_KEY_PATH: _keys/rsa_key.p8
+  SNOWFLAKE_ACCOUNT_NAME: YOUR_ACCOUNT_NAME
+  SNOWFLAKE_USERNAME: YOUR_USERNAME
+  SNOWFLAKE_PRIVATE_KEY:
+    sh: cat {{.PRIVATE_KEY_PATH}}
+  SNOWFLAKE_PUBLIC_KEY_FINGERPRINT: "YOUR_PUBLIC_KEY_FINGERPRINT"
+tasks:
+  generate-keypair:
+    cmds:
+      - mkdir -p _keys
+      - openssl genrsa 2048 | openssl pkcs8 -topk8 -inform PEM -out _keys/rsa_key.p8 -nocrypt
+      - openssl rsa -in _keys/rsa_key.p8 -pubout -out _keys/rsa_key.pub
+
+  test-keypair:
+    cmds:
+      - snowsql -a {{.SNOWFLAKE_ACCOUNT_NAME}} -u {{.SNOWFLAKE_USERNAME}} --private-key-path _keys/rsa_key.p8 -q "SELECT CURRENT_TIMESTAMP() AS now"
+
+  generate-jwt:
+    cmds:
+      - |
+        HEADER='{
+          "alg": "RS256",
+          "typ": "JWT"
+        }'
+
+        ACCOUNT="{{.SNOWFLAKE_ACCOUNT_NAME}}"
+        USER="{{.SNOWFLAKE_USERNAME}}"
+        PUBLIC_KEY_FP="{{.SNOWFLAKE_PUBLIC_KEY_FINGERPRINT}}"
+        NOW=$(date +%s)
+        EXP=$(($NOW + 3540))
+
+        QUALIFIED_USERNAME=$(echo "$ACCOUNT.$USER" | tr '[:lower:]' '[:upper:]')
+
+        PAYLOAD=$(jq -n --arg iss "$QUALIFIED_USERNAME.SHA256:$PUBLIC_KEY_FP" \
+                 --arg sub "$QUALIFIED_USERNAME" \
+                 --argjson iat $NOW \
+                 --argjson exp $EXP \
+                 '{
+                     iss: $iss,
+                     sub: $sub,
+                     iat: $iat,
+                     exp: $exp
+                   }')
+
+        HEADER_BASE64=$(echo -n "$HEADER" | openssl base64 -A | tr -d '=' | tr '/+' '_-')
+        PAYLOAD_BASE64=$(echo -n "$PAYLOAD" | openssl base64 -A | tr -d '=' | tr '/+' '_-')
+        SIGNATURE=$(echo -n "$HEADER_BASE64.$PAYLOAD_BASE64" | openssl dgst -sha256 -sign {{.PRIVATE_KEY_PATH}} | openssl base64 -A | tr -d '=' | tr '/+' '_-')
+        GENERATED_JWT="$HEADER_BASE64.$PAYLOAD_BASE64.$SIGNATURE"
+        echo $GENERATED_JWT
+
+  test-sql:
+    cmds:
+      - |
+        JWT="$(task generate-jwt)"
+        echo "Testing SQL..."
+        
+        curl -iv -X POST \
+        -H "Content-Type: application/json" \
+        -H "Authorization: Bearer $JWT" \
+        -H "X-Snowflake-Authorization-Token-Type: KEYPAIR_JWT" \
+        -d '{"statement": "SELECT CURRENT_TIMESTAMP()"}' \
+          "https://{{.SNOWFLAKE_ACCOUNT_NAME}}.snowflakecomputing.com/api/v2/statements"
+
+  docker-build:
+    cmds:
+      - docker build --progress plain -t {{.DOCKER_TAG}} .
+
+  docker-run:
+    cmds:
+      - |
+        docker run -it -d \
+          -p "8000:80" \
+          -v "$(pwd)/app:/app" \
+          -v "$(pwd)/lib:/app-libs" \
+          -v "$(pwd)/nginx/conf/nginx.conf:/usr/local/openresty/nginx/conf/nginx.conf" \
+          -e SNOWFLAKE_ACCOUNT_NAME="{{.SNOWFLAKE_ACCOUNT_NAME}}" \
+          -e SNOWFLAKE_DATABASE="{{.SNOWFLAKE_DATABASE}}" \
+          -e SNOWFLAKE_USERNAME="{{.SNOWFLAKE_USERNAME}}" \
+          -e SNOWFLAKE_PRIVATE_KEY="{{.SNOWFLAKE_PRIVATE_KEY}}" \
+          -e SNOWFLAKE_PUBLIC_KEY_FINGERPRINT="{{.SNOWFLAKE_PUBLIC_KEY_FINGERPRINT}}" \
+          {{.DOCKER_TAG}}
+        

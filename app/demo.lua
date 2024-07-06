@@ -36,11 +36,11 @@ ngx.log(ngx.INFO, "Testing CortexAI Translation services...")
 local result_translation, err_translation = snowflake.execute_sql("SELECT SNOWFLAKE.CORTEX.TRANSLATE(?, '', ?) AS TRANSLATION_RESULT", {
     ["1"] = {
         type = "TEXT",
-        value = "Ich kriege den Fehlercode 103 zurück."
+        value = "Skitsanos does pretty awesome things."
     },
     ["2"] = {
         type = "TEXT",
-        value = "en"
+        value = "de"
     }
 })
 
